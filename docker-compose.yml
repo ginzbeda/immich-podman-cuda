@@ -5,18 +5,14 @@ services:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
     volumes:
-      - ${IMMICH_DATA_LOCATION}:/usr/src/app/upload
-      - ${EXTERNAL_LIBRARY_LOCATION}:/usr/src/app/external:ro
+      - ${IMMICH_STORAGE_LOCATION}:/usr/src/app/upload
       - /etc/localtime:/etc/localtime:ro
-    env_file:
-      - .env
+    env_file: [.env]
     ports:
-      - 0.0.0.0:2283:2283  # Explicitly bind to all interfaces
+      - 2283:2283
     devices:
       - nvidia.com/gpu=all
     environment:
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
-      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}
       - IMMICH_HOST=${IMMICH_HOST}
     depends_on:
       - redis
@@ -25,37 +21,35 @@ services:
 
   immich-machine-learning:
     container_name: immich_machine_learning
+    # Using the CUDA-specific image for hardware-accelerated processing
     image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}-cuda
     volumes:
       - model-cache:/cache
-    env_file:
-      - .env
+    env_file: [.env]
     devices:
       - nvidia.com/gpu=all
     environment:
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
-      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}
       - IMMICH_MACHINE_LEARNING_DEVICE=${IMMICH_MACHINE_LEARNING_DEVICE}
     restart: always
 
   redis:
     container_name: immich_redis
     image: docker.io/library/redis:6.2-alpine
+    volumes:
+      - ${IMMICH_CONFIG_LOCATION}/redis:/data
     restart: always
 
   database:
     container_name: immich_postgres
     image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
-    env_file:
-      - .env
+    env_file: [.env]
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
       POSTGRES_DB: ${DB_DATABASE_NAME}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ${IMMICH_CONFIG_LOCATION}/postgres:/var/lib/postgresql/data
     restart: always
 
 volumes:
-  pgdata:
   model-cache:
