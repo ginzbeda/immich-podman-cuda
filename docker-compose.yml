@@ -1,0 +1,6 @@
+name: immich
+
+
+volumes:
+  pgdata:
+  model-cache:
