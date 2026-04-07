@@ -1,6 +1,6 @@
 # Immich Deployment: NVIDIA-Accelerated Podman Stack
 
-This repository contains a rootless-ready Podman Compose configuration for [Immich](https://immich.app/), optimized for hardware-accelerated machine learning and external media management.
+This repository contains a rootless-ready Podman Compose configuration for [Immich](https://immich.app/), optimized for hardware-accelerated machine learning and high-performance tiered storage.
 
 ## Key Configurations
 
@@ -9,14 +9,19 @@ The stack is configured to leverage CUDA for the `immich-machine-learning` servi
 * **Note:** Unlike Docker, Podman requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) to be configured with **CDI (Container Device Interface)** support.
 * **Logic:** The `devices` block in the compose file utilizes the `nvidia.com/gpu=all` CDI device for seamless passthrough.
 
-### 2. Data Persistence and State
-* **Immich Data:** System thumbnails and encoded videos are stored at `IMMICH_DATA_LOCATION`.
-* **Database:** PostgreSQL data is persisted via a named volume (`pgdata`) to ensure resilience across pod restarts. We utilize `pgvecto-rs` to support high-performance vector searches for facial recognition.
+## Storage Architecture: Tiered SSD/HDD Deployment
 
-### 3. "Read-Only" External Libraries
-To maintain the integrity of an existing photo collection, this setup utilizes the `EXTERNAL_LIBRARY_LOCATION` variable.
-* The source media is mounted as `:ro` (Read-Only). 
-* This allows Immich to index and generate thumbnails for your collection without risking accidental modification or deletion of the source files.
+This stack is engineered for a "Hot/Cold" storage split to maximize performance and organization while maintaining bulk capacity on high-density drives.
+
+### 1. High-Performance "Hot" Tier (SSD)
+* **Path:** Defined by `IMMICH_CONFIG_LOCATION`.
+* **Logic:** Stores the **PostgreSQL** database and **Redis** cache. 
+* **Benefit:** Since facial recognition and metadata searches are IO-intensive, keeping the database on an SSD ensures near-instant UI response times.
+
+### 2. Bulk "Cold" Tier (HDD)
+* **Path:** Defined by `IMMICH_STORAGE_LOCATION`.
+* **Logic:** Stores all **uploaded media**, generated **thumbnails**, and **transcoding** results.
+* **Benefit:** Optimized for large-scale storage. Storing these large files on an HDD provides massive scale at a lower cost without impacting system speed.
 
 ---
 
@@ -39,8 +44,3 @@ To maintain the integrity of an existing photo collection, this setup utilizes t
     ```bash
     podman-compose up -d
     ```
-
-## Recommended Post-Install Config
-
-* **SELinux/Permissions:** If running in a rootless environment, ensure your mount points (like `IMMICH_DATA_LOCATION`) have the correct user namespace permissions. If SELinux is enforcing, append `:z` or `:Z` to your volume mounts to handle relabeling automatically.
-* **ML Model TTL:** This stack is configured with `IMMICH_MACHINE_LEARNING_MODEL_TTL=300`. This keeps the ML models in GPU memory for 5 minutes of inactivity, striking a balance between instant processing response and freeing up VRAM for other system tasks.
