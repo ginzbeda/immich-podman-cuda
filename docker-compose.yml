@@ -23,6 +23,21 @@ services:
       - database
     restart: always
 
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:${IMMICH_VERSION:-release}-cuda
+    volumes:
+      - model-cache:/cache
+    env_file:
+      - .env
+    devices:
+      - nvidia.com/gpu=all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}
+      - IMMICH_MACHINE_LEARNING_DEVICE=${IMMICH_MACHINE_LEARNING_DEVICE}
+    restart: always
+
   redis:
     container_name: immich_redis
     image: docker.io/library/redis:6.2-alpine
