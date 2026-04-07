@@ -8,6 +8,7 @@ This repository contains a rootless-ready Podman Compose configuration for [Immi
 The stack is configured to leverage CUDA for the `immich-machine-learning` service. 
 * **Note:** Unlike Docker, Podman requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) to be configured with **CDI (Container Device Interface)** support.
 * **Logic:** The `devices` block in the compose file utilizes the `nvidia.com/gpu=all` CDI device for seamless passthrough.
+* **Optimization:** This setup explicitly uses the `immich-machine-learning:release-cuda` image tag. This ensures that the container includes the necessary CUDA libraries to utilize the GTX 1080 without manual driver injection.
 
 ## Storage Architecture: Tiered SSD/HDD Deployment
 
