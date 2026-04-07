@@ -1,6 +1,28 @@
 name: immich
 
 services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
+    volumes:
+      - ${IMMICH_DATA_LOCATION}:/usr/src/app/upload
+      - ${EXTERNAL_LIBRARY_LOCATION}:/usr/src/app/external:ro
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - .env
+    ports:
+      - 0.0.0.0:2283:2283  # Explicitly bind to all interfaces
+    devices:
+      - nvidia.com/gpu=all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
+      - NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES}
+      - IMMICH_HOST=${IMMICH_HOST}
+    depends_on:
+      - redis
+      - database
+    restart: always
+
   redis:
     container_name: immich_redis
     image: docker.io/library/redis:6.2-alpine
