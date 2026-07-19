@@ -1,0 +1,24 @@
+[Unit]
+Description=Immich PostgreSQL (pgvecto-rs)
+
+[Container]
+ContainerName=immich_postgres
+Image=docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+Network=immich.network
+# Alias matches the compose service name so either hostname resolves
+NetworkAlias=database
+EnvironmentFile=%h/.config/immich/immich.env
+# Postgres expects POSTGRES_*; systemd expands ${DB_*} from the [Service] EnvironmentFile
+Environment=POSTGRES_PASSWORD=${DB_PASSWORD}
+Environment=POSTGRES_USER=${DB_USERNAME}
+Environment=POSTGRES_DB=${DB_DATABASE_NAME}
+Volume=${IMMICH_CONFIG_LOCATION}/postgres:/var/lib/postgresql/data
+
+[Service]
+# Enables ${VAR} expansion for Volume=/Environment= lines above
+EnvironmentFile=%h/.config/immich/immich.env
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

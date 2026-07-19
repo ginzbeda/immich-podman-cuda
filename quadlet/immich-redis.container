@@ -1,0 +1,18 @@
+[Unit]
+Description=Immich Redis cache
+
+[Container]
+ContainerName=immich_redis
+Image=docker.io/library/redis:6.2-alpine
+Network=immich.network
+# Immich defaults REDIS_HOSTNAME to "redis"
+NetworkAlias=redis
+Volume=${IMMICH_CONFIG_LOCATION}/redis:/data
+
+[Service]
+EnvironmentFile=%h/.config/immich/immich.env
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

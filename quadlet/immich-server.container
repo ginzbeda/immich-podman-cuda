@@ -1,0 +1,25 @@
+[Unit]
+Description=Immich Server
+Requires=immich-redis.service immich-postgres.service
+After=immich-redis.service immich-postgres.service
+
+[Container]
+ContainerName=immich_server
+Image=ghcr.io/immich-app/immich-server:release
+AutoUpdate=registry
+Network=immich.network
+EnvironmentFile=%h/.config/immich/immich.env
+PublishPort=2283:2283
+# GPU available for hardware video transcoding
+AddDevice=nvidia.com/gpu=all
+Volume=${IMMICH_STORAGE_LOCATION}:/usr/src/app/upload
+Volume=/etc/localtime:/etc/localtime:ro
+
+[Service]
+# Enables ${IMMICH_STORAGE_LOCATION} expansion in Volume= above
+EnvironmentFile=%h/.config/immich/immich.env
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

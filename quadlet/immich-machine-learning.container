@@ -1,0 +1,23 @@
+[Unit]
+Description=Immich Machine Learning (CUDA)
+
+[Container]
+ContainerName=immich_machine_learning
+Image=ghcr.io/immich-app/immich-machine-learning:release-cuda
+AutoUpdate=registry
+Network=immich.network
+# immich-server's default IMMICH_MACHINE_LEARNING_URL targets this hostname
+NetworkAlias=immich-machine-learning
+EnvironmentFile=%h/.config/immich/immich.env
+# NVIDIA GPU passthrough via CDI (requires nvidia-container-toolkit with CDI specs generated)
+AddDevice=nvidia.com/gpu=all
+Volume=immich-model-cache.volume:/cache
+
+[Service]
+EnvironmentFile=%h/.config/immich/immich.env
+Restart=always
+# First start pulls a large CUDA image; allow time
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

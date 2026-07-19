@@ -45,6 +45,10 @@ This stack is engineered for a "Hot/Cold" storage split to maximize performance 
     podman-compose up -d
     ```
 
+### Alternative: systemd-native deployment (Quadlet)
+
+For a production-style setup that starts on boot and is supervised by systemd — no `podman-compose` required — use the Quadlet units in [`quadlet/`](quadlet/README.md). Both deployment methods share the same `.env` file; the compose file remains the portable reference configuration.
+
 ## Recommended Post-Install Config
 
 * **Topic-Based Storage Template:** To maintain a human-readable library that matches your personal organization, enable the **Storage Template** in Immich Settings and set it to: `{{album}}/{{y}}/{{MM}}/{{filename}}`.
