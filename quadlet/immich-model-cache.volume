@@ -1,0 +1,7 @@
+[Unit]
+Description=Immich ML model cache
+
+[Volume]
+# Matches the compose-created volume so quadlet reuses the already-downloaded
+# CUDA models instead of re-fetching several GB on first start.
+VolumeName=immich_model-cache

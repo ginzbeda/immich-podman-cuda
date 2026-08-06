@@ -1,0 +1,21 @@
+[Unit]
+Description=Immich Valkey cache
+
+[Container]
+ContainerName=immich_redis
+# Must match docker-compose.yml (dev branch had redis:6.2-alpine)
+Image=docker.io/valkey/valkey:9@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
+Network=immich.network
+# Immich defaults REDIS_HOSTNAME to "redis"; ContainerName resolves too
+NetworkAlias=redis
+EnvironmentFile=%h/dev/repo/immich-app/.env
+Volume=${HOST_MEDIA_LOCATION}/redis:/data
+
+[Service]
+# Enables ${HOST_MEDIA_LOCATION} expansion in Volume= above
+EnvironmentFile=%h/dev/repo/immich-app/.env
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

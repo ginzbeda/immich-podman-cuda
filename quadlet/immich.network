@@ -1,0 +1,5 @@
+[Unit]
+Description=Immich stack network
+
+[Network]
+NetworkName=immich

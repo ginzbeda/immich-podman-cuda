@@ -1,0 +1,39 @@
+[Unit]
+Description=Immich Server
+Requires=immich-redis.service immich-postgres.service
+After=immich-redis.service immich-postgres.service
+
+[Container]
+ContainerName=immich_server
+Image=ghcr.io/immich-app/immich-server:release
+AutoUpdate=registry
+Network=immich.network
+EnvironmentFile=%h/dev/repo/immich-app/.env
+# Bound to loopback, matching docker-compose.yml. Reach it from Windows via
+# WSL's localhost forwarding; put a reverse proxy in front for LAN access.
+PublishPort=127.0.0.1:2283:2283
+# GPU available for hardware video transcoding
+AddDevice=nvidia.com/gpu=all
+
+# --- Tiered storage: SSD upload root, with the bulk library mounted over it ---
+# 1. UPLOAD ROOT (SSD) — thumbs, encoded-video, profile, upload, backups
+Volume=${HOST_MEDIA_LOCATION}:/usr/src/app/upload
+# 2. MANAGED LIBRARY (HDD) — originals, mounted over the root's library/ subdir
+Volume=${HOST_LIBRARY_LOCATION}:/usr/src/app/upload/library
+# 3. EXTERNAL LIBRARY SOURCE (HDD, read-only) — the curated folder tree
+Volume=${HOST_IMPORT_LOCATION}:/usr/src/app/external:ro
+# TEMPORARY — Photos/ could not be moved into the import tree (open Windows
+# handle). Mounted into place so restored asset paths resolve. See .env.
+Volume=${HOST_IMPORT_PHOTOS_LOCATION}:/usr/src/app/external/Photos:ro
+
+Volume=/etc/localtime:/etc/localtime:ro
+
+[Service]
+# Enables ${HOST_MEDIA_LOCATION} / ${HOST_LIBRARY_LOCATION} /
+# ${HOST_IMPORT_LOCATION} expansion in the Volume= lines above
+EnvironmentFile=%h/dev/repo/immich-app/.env
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target
