@@ -38,7 +38,9 @@ Volume=/etc/localtime:/etc/localtime:ro
 
 [Service]
 # Enables ${HOST_MEDIA_LOCATION} / ${HOST_LIBRARY_LOCATION} /
-# ${HOST_IMPORT_LOCATION} expansion in the Volume= lines above
+# ${HOST_BULK_LOCATION} / ${HOST_IMPORT_LOCATION} expansion in the Volume=
+# lines above. An unset variable expands to empty and fails the bind mount at
+# start, so add HOST_BULK_LOCATION to .env before daemon-reload.
 EnvironmentFile=%h/dev/repo/immich-app/.env
 Restart=always
 TimeoutStartSec=900
