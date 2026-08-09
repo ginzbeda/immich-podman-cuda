@@ -5,7 +5,8 @@ services:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
     volumes:
-      # 1. UPLOAD ROOT (SSD) — thumbs, encoded-video, profile, upload, backups.
+      # Mount order matters: a nested mount must follow the mount it sits in.
+      # 1. UPLOAD ROOT (SSD) — thumbs and in-flight uploads.
       # Small files read constantly while browsing.
       - ${HOST_MEDIA_LOCATION}:/usr/src/app/upload
 
@@ -13,7 +14,14 @@ services:
       # subdirectory so originals land on bulk storage.
       - ${HOST_LIBRARY_LOCATION}:/usr/src/app/upload/library
 
-      # 3. EXTERNAL LIBRARY SOURCE (HDD, read-only) — the curated folder tree.
+      # 3. BULK IMMICH DATA (HDD) — large or cold, mounted over the SSD root.
+      # NOTE: encoded-video/ holds motion-photo companion videos that are the
+      # ONLY copy of that data, not just regenerable transcodes.
+      - ${HOST_BULK_LOCATION}/encoded-video:/usr/src/app/upload/encoded-video
+      - ${HOST_BULK_LOCATION}/backups:/usr/src/app/upload/backups
+      - ${HOST_BULK_LOCATION}/profile:/usr/src/app/upload/profile
+
+      # 4. EXTERNAL LIBRARY SOURCE (HDD, read-only) — the curated folder tree.
       # Immich indexes these in place and never writes here.
       - ${HOST_IMPORT_LOCATION}:/usr/src/app/external:ro
       # TEMPORARY — Photos/ could not be moved into the import tree (open

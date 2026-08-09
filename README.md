@@ -4,21 +4,28 @@ This repository contains a rootless-ready Podman Compose configuration for Immic
 
 ## 1. Storage Architecture: Tiered Deployment
 
-This stack is engineered for a "Hot/Cold" storage split to maximize UI performance while maintaining bulk capacity on high-density drives. Three host paths are mounted into `immich-server`:
+This stack is engineered for a "Hot/Cold" storage split to maximize UI performance while maintaining bulk capacity on high-density drives. Four host paths are mounted into `immich-server`:
 
 | Variable | Container path | Tier | Holds |
 |---|---|---|---|
-| `HOST_MEDIA_LOCATION` | `/usr/src/app/upload` | SSD | Thumbnails, transcodes, profile images, in-flight uploads, DB backups |
+| `HOST_MEDIA_LOCATION` | `/usr/src/app/upload` | SSD | Thumbnails and in-flight uploads — the genuinely hot paths |
 | `HOST_LIBRARY_LOCATION` | `/usr/src/app/upload/library` | HDD | Managed originals — mounted *over* the upload root's `library/` subdirectory |
+| `HOST_BULK_LOCATION` | `/usr/src/app/upload/{encoded-video,backups,profile}` | HDD | Transcodes, DB backups, profile images — large or cold, each mounted *over* the upload root |
 | `HOST_IMPORT_LOCATION` | `/usr/src/app/external` (ro) | HDD | External Library source tree, indexed in place and never written to |
 
+Only `HOST_MEDIA_LOCATION` is a plain mount; the other three are mounted *over* subdirectories of it. **Mount order matters** — a nested mount must be declared after the mount it sits inside.
+
+Because every container path stays fixed and Immich records container paths in its database, **re-tiering never requires a database change**: only the host side of a bind mount moves.
+
 ### High-Performance Tier (SSD)
-* **Usage:** Thumbnails, transcodes, profile images, Redis cache. The PostgreSQL cluster lives in the `immich_pgdata` podman named volume rather than a bind mount, which avoids NTFS/DrvFs permission problems under WSL2.
+* **Usage:** Thumbnails, in-flight uploads, Redis cache. The PostgreSQL cluster lives in the `immich_pgdata` podman named volume rather than a bind mount, which avoids NTFS/DrvFs permission problems under WSL2.
 * **Logic:** IO-intensive operations (metadata, facial recognition, thumbnail reads) stay on fast storage for a responsive UI.
 
 ### Bulk Media Tier (HDD)
-* **Usage:** Original high-resolution photos and videos.
-* **Logic:** Optimized for large-scale storage capacity.
+* **Usage:** Original high-resolution photos and videos, plus Immich's own large-or-cold output — transcodes, database backups and profile images.
+* **Logic:** Optimized for large-scale storage capacity. Transcodes stream sequentially so HDD is adequate; under WSL/9p expect video playback to take roughly a second longer to start than from SSD.
+
+> ⚠️ **`encoded-video/` is not purely derived data.** Motion-photo (Live Photo) companion videos are stored there as their *only* copy — they are not regenerable from an original the way a transcode is. Copy it, verify, and only then delete the source; never clear it as a cache.
 
 > **Give `HOST_MEDIA_LOCATION` a directory Immich owns exclusively.** Point it at a folder that already contains your photos and Immich will create its working directories — `thumbs/`, `upload/`, `encoded-video/`, `backups/`, `library/` — interleaved with your own. If you want existing media indexed without being moved, that is what `HOST_IMPORT_LOCATION` and an External Library are for.
 
@@ -40,6 +47,7 @@ Example paths for Linux/WSL2:
 HOST_MEDIA_LOCATION=/mnt/e/Media/immich-data
 HOST_LIBRARY_LOCATION=/mnt/d/Media/library
 HOST_IMPORT_LOCATION=/mnt/d/Media/immich-import
+HOST_BULK_LOCATION=/mnt/d/Media/Immich-Data
 DB_PASSWORD=your_secure_password
 ```
 
@@ -94,10 +102,17 @@ To maintain an organized library that is easy to navigate outside of the Immich 
 To verify that your tiered storage is correctly mapping to the intended drives:
 
 ```bash
-podman exec immich_server df -h /usr/src/app/upload /usr/src/app/upload/library /usr/src/app/external
+podman exec immich_server df -h \
+  /usr/src/app/upload \
+  /usr/src/app/upload/thumbs \
+  /usr/src/app/upload/library \
+  /usr/src/app/upload/encoded-video \
+  /usr/src/app/upload/backups \
+  /usr/src/app/upload/profile \
+  /usr/src/app/external
 ```
 
-The upload root should report your SSD's capacity, and both HDD paths your bulk drive's. If `library` reports the same device as the upload root, the override mount is not in effect.
+`upload` and `thumbs` should report your SSD's capacity; `library`, `encoded-video`, `backups`, `profile` and `external` should all report the bulk drive's. If any of those reports the same device as the upload root, that override mount is not in effect.
 
 ### Maintenance & Jobs
 After enabling the Storage Template, go to **Administration > Jobs** and run:

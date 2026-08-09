@@ -15,12 +15,20 @@ PublishPort=127.0.0.1:2283:2283
 # GPU available for hardware video transcoding
 AddDevice=nvidia.com/gpu=all
 
-# --- Tiered storage: SSD upload root, with the bulk library mounted over it ---
-# 1. UPLOAD ROOT (SSD) — thumbs, encoded-video, profile, upload, backups
+# --- Tiered storage: SSD upload root, with the bulk directories mounted over it
+# Mount order matters: a nested mount must follow the mount it sits inside.
+# Container paths never change, so re-tiering needs no database change.
+# 1. UPLOAD ROOT (SSD) — thumbs and in-flight uploads
 Volume=${HOST_MEDIA_LOCATION}:/usr/src/app/upload
 # 2. MANAGED LIBRARY (HDD) — originals, mounted over the root's library/ subdir
 Volume=${HOST_LIBRARY_LOCATION}:/usr/src/app/upload/library
-# 3. EXTERNAL LIBRARY SOURCE (HDD, read-only) — the curated folder tree
+# 3. BULK IMMICH DATA (HDD) — large or cold, mounted over the SSD upload root.
+# NOTE: encoded-video/ holds motion-photo companion videos that are the ONLY
+# copy of that data, not just regenerable transcodes. Never delete it blindly.
+Volume=${HOST_BULK_LOCATION}/encoded-video:/usr/src/app/upload/encoded-video
+Volume=${HOST_BULK_LOCATION}/backups:/usr/src/app/upload/backups
+Volume=${HOST_BULK_LOCATION}/profile:/usr/src/app/upload/profile
+# 4. EXTERNAL LIBRARY SOURCE (HDD, read-only) — the curated folder tree
 Volume=${HOST_IMPORT_LOCATION}:/usr/src/app/external:ro
 # TEMPORARY — Photos/ could not be moved into the import tree (open Windows
 # handle). Mounted into place so restored asset paths resolve. See .env.
