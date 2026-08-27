@@ -5,19 +5,24 @@ Description=Immich Machine Learning (CUDA)
 ContainerName=immich_machine_learning
 Image=ghcr.io/immich-app/immich-machine-learning:release-cuda
 AutoUpdate=registry
-Network=immich.network
-# immich-server's default IMMICH_MACHINE_LEARNING_URL targets this hostname
-NetworkAlias=immich-machine-learning
+Pod=immich.pod
+# In the pod's shared netns immich-server reaches this at localhost:3003
+# (IMMICH_MACHINE_LEARNING_URL is overridden in immich-pod.env).
 EnvironmentFile=%h/dev/repo/immich-app/.env
+EnvironmentFile=%h/dev/repo/immich-app/quadlet/immich-pod.env
 # NVIDIA GPU passthrough via CDI (requires nvidia-container-toolkit with CDI specs generated)
 AddDevice=nvidia.com/gpu=all
 Volume=immich-model-cache.volume:/cache
 
 [Service]
 EnvironmentFile=%h/dev/repo/immich-app/.env
+EnvironmentFile=%h/dev/repo/immich-app/quadlet/immich-pod.env
 Restart=always
 # First start pulls a large CUDA image; allow time
 TimeoutStartSec=900
+# uvicorn exits 143 (128+SIGTERM) on a normal stop and has no SIGTERM handler of
+# its own, so systemd would otherwise mark every clean shutdown as failed.
+SuccessExitStatus=143
 
 [Install]
 WantedBy=default.target

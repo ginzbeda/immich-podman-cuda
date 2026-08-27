@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+#
+# immichctl - manage the Immich quadlet pod as one service.
+#
+# The stack runs as a podman pod (immich.pod) supervised by systemd. Quadlet gives
+# every member BindsTo=immich-pod.service, so the pod unit is the single handle:
+# stopping it stops all four containers, starting it starts them.
+#
+#   ./scripts/immichctl install     copy units to ~/.config/containers/systemd + daemon-reload
+#   ./scripts/immichctl start       start the whole stack
+#   ./scripts/immichctl stop        stop the whole stack
+#   ./scripts/immichctl restart     stop + start
+#   ./scripts/immichctl status      unit states, pod, containers, API health
+#   ./scripts/immichctl logs [svc]  follow logs (all units, or one: server|ml|db|redis)
+#   ./scripts/immichctl ps          containers in the pod
+#   ./scripts/immichctl update      pull newer images and recreate
+#   ./scripts/immichctl remove      stop + remove pod/containers (volumes untouched)
+#   ./scripts/immichctl uninstall   remove + delete the installed unit files
+#
+# Never use `podman stop immich_server` - Restart=always makes systemd bring it
+# straight back. Always go through this script or systemctl --user.
+
+set -uo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+QUADLET_SRC="$REPO/quadlet"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/containers/systemd"
+POD_UNIT="immich-pod.service"
+POD_NAME="immich"
+
+# Members, in dependency order. The pod unit pulls these in; they are listed for
+# status/logs output and as a fallback if the pod unit is missing.
+MEMBERS=(immich-postgres.service immich-redis.service immich-machine-learning.service immich-server.service)
+INFRA=(immich-network.service immich-pgdata-volume.service immich-model-cache-volume.service)
+
+C_OK=$'\033[32m'; C_ERR=$'\033[31m'; C_WARN=$'\033[33m'; C_DIM=$'\033[2m'; C_OFF=$'\033[0m'
+[ -t 1 ] || { C_OK=""; C_ERR=""; C_WARN=""; C_DIM=""; C_OFF=""; }
+
+say()  { printf '%s==>%s %s\n' "$C_DIM" "$C_OFF" "$*"; }
+ok()   { printf '%s  ok%s %s\n' "$C_OK" "$C_OFF" "$*"; }
+warn() { printf '%swarn%s %s\n' "$C_WARN" "$C_OFF" "$*"; }
+die()  { printf '%s err%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+
+require_installed() {
+  [ -f "$UNIT_DIR/immich.pod" ] || die "units not installed - run: $0 install"
+}
+
+cmd_install() {
+  say "Installing quadlet units to $UNIT_DIR"
+  mkdir -p "$UNIT_DIR"
+  # Explicit globs: a bare `cp quadlet/*` would drop README.md into the unit dir.
+  local n=0
+  for f in "$QUADLET_SRC"/*.container "$QUADLET_SRC"/*.volume \
+           "$QUADLET_SRC"/*.network "$QUADLET_SRC"/*.pod; do
+    [ -e "$f" ] || continue
+    cp "$f" "$UNIT_DIR/" && n=$((n+1))
+  done
+  ok "copied $n unit files"
+  systemctl --user daemon-reload || die "daemon-reload failed"
+  ok "daemon-reload done"
+
+  # Catch syntax errors before anything tries to start.
+  local quadlet_bin
+  quadlet_bin=$(command -v quadlet || echo /usr/local/libexec/podman/quadlet)
+  if [ -x "$quadlet_bin" ]; then
+    if QUADLET_UNIT_DIRS="$UNIT_DIR" "$quadlet_bin" --user --dryrun >/dev/null 2>&1; then
+      ok "unit generation validated"
+    else
+      warn "quadlet reported problems - inspect with:"
+      warn "  QUADLET_UNIT_DIRS=$UNIT_DIR $quadlet_bin --user --dryrun"
+    fi
+  fi
+}
+
+cmd_start() {
+  require_installed
+  say "Starting $POD_UNIT"
+  systemctl --user start "$POD_UNIT" || die "start failed - see: $0 logs"
+  ok "started"
+  sleep 3
+  cmd_status
+}
+
+cmd_stop() {
+  say "Stopping $POD_UNIT (stops every member via BindsTo=)"
+  systemctl --user stop "$POD_UNIT" 2>/dev/null
+  # Fall back to members if the pod unit is not loaded (e.g. pre-pod layout).
+  systemctl --user stop "${MEMBERS[@]}" 2>/dev/null
+  # Clear the failed state left by containers that exit 143 on SIGTERM.
+  systemctl --user reset-failed "$POD_UNIT" "${MEMBERS[@]}" 2>/dev/null
+  ok "stopped"
+  podman ps --filter "pod=$POD_NAME" --format '{{.Names}}' 2>/dev/null | grep -q . \
+    && warn "containers still present:" && podman ps --filter "pod=$POD_NAME" --format '  {{.Names}}\t{{.Status}}'
+  return 0
+}
+
+cmd_restart() { cmd_stop; echo; cmd_start; }
+
+cmd_status() {
+  say "Units"
+  for u in "$POD_UNIT" "${MEMBERS[@]}" "${INFRA[@]}"; do
+    local state; state=$(systemctl --user is-active "$u" 2>/dev/null || true)
+    case "$state" in
+      active)   printf '  %s%-38s %s%s\n' "$C_OK"   "$u" "$state" "$C_OFF" ;;
+      failed)   printf '  %s%-38s %s%s\n' "$C_ERR"  "$u" "$state" "$C_OFF" ;;
+      *)        printf '  %s%-38s %s%s\n' "$C_DIM"  "$u" "${state:-not-loaded}" "$C_OFF" ;;
+    esac
+  done
+
+  echo; say "Pod"
+  podman pod ps --filter "name=$POD_NAME" --format '  {{.Name}}  {{.Status}}  {{.NumberOfContainers}} containers' 2>/dev/null \
+    | grep -q . || printf '  %s(no pod)%s\n' "$C_DIM" "$C_OFF"
+  podman pod ps --filter "name=$POD_NAME" --format '  {{.Name}}  {{.Status}}  {{.NumberOfContainers}} containers' 2>/dev/null
+
+  echo; say "Containers"
+  podman ps --filter "pod=$POD_NAME" --format '  {{.Names}}\t{{.Status}}' 2>/dev/null \
+    || printf '  %s(none)%s\n' "$C_DIM" "$C_OFF"
+
+  echo; say "Data volumes (must always exist)"
+  for v in immich_pgdata immich_model-cache; do
+    if podman volume exists "$v" 2>/dev/null; then ok "$v"; else die "$v MISSING"; fi
+  done
+
+  echo; say "API"
+  if curl -sf -m 5 http://127.0.0.1:2283/api/server/ping >/dev/null 2>&1; then
+    ok "http://127.0.0.1:2283 responding"
+  else
+    printf '  %snot responding%s (normal for ~30s after start)\n' "$C_DIM" "$C_OFF"
+  fi
+}
+
+cmd_logs() {
+  local sel="${1:-}"
+  case "$sel" in
+    server)  systemctl --user status immich-server.service >/dev/null 2>&1; journalctl --user -u immich-server.service -f ;;
+    ml)      journalctl --user -u immich-machine-learning.service -f ;;
+    db)      journalctl --user -u immich-postgres.service -f ;;
+    redis)   journalctl --user -u immich-redis.service -f ;;
+    "")      journalctl --user -u "$POD_UNIT" $(printf -- '-u %s ' "${MEMBERS[@]}") -f ;;
+    *)       die "unknown service '$sel' (use: server|ml|db|redis)" ;;
+  esac
+}
+
+cmd_ps() {
+  podman ps -a --filter "pod=$POD_NAME" --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+}
+
+cmd_update() {
+  require_installed
+  say "Pulling newer images (server + ML only; db/redis are digest-pinned)"
+  podman auto-update --dry-run
+  echo
+  read -r -p "Apply these updates? [y/N] " reply
+  [[ "$reply" =~ ^[Yy]$ ]] || { warn "aborted"; return 0; }
+  podman auto-update || die "auto-update failed"
+  ok "updated"
+}
+
+cmd_remove() {
+  say "Stopping and removing pod + containers"
+  cmd_stop
+  podman pod rm -f "$POD_NAME" 2>/dev/null && ok "pod removed" || true
+  for c in immich_server immich_machine_learning immich_postgres immich_redis; do
+    podman rm -f "$c" >/dev/null 2>&1 && ok "removed $c" || true
+  done
+  echo
+  ok "volumes immich_pgdata and immich_model-cache were NOT touched"
+  warn "to delete the database too (destroys all albums/faces/metadata):"
+  warn "  podman volume rm immich_pgdata"
+}
+
+cmd_uninstall() {
+  cmd_remove
+  echo; say "Removing installed unit files"
+  local n=0
+  for f in immich.pod immich.network immich-pod.env \
+           immich-server.container immich-machine-learning.container \
+           immich-postgres.container immich-redis.container \
+           immich-pgdata.volume immich-model-cache.volume; do
+    [ -e "$UNIT_DIR/$f" ] && rm -f "$UNIT_DIR/$f" && n=$((n+1))
+  done
+  systemctl --user daemon-reload
+  ok "removed $n unit files; volumes still intact"
+}
+
+# Print the header comment block (everything from line 3 until the first non-comment).
+usage() {
+  awk 'NR<3 {next} /^#/ {sub(/^# ?/,""); print; next} {exit}' "${BASH_SOURCE[0]}"
+}
+
+case "${1:-}" in
+  install)   cmd_install ;;
+  start|up)  cmd_start ;;
+  stop|down) cmd_stop ;;
+  restart)   cmd_restart ;;
+  status)    cmd_status ;;
+  logs)      shift; cmd_logs "${1:-}" ;;
+  ps)        cmd_ps ;;
+  update)    cmd_update ;;
+  remove)    cmd_remove ;;
+  uninstall) cmd_uninstall ;;
+  ""|-h|--help|help) usage ;;
+  *)         die "unknown command '$1' (try: $0 --help)" ;;
+esac

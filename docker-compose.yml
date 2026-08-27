@@ -5,20 +5,19 @@ services:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
     volumes:
-      # 1. UPLOAD ROOT (SSD) — thumbs, encoded-video, profile, upload, backups.
+      # 1. WORKING DIRS (SSD) — thumbs, encoded-video, profile, upload, backups.
       # Small files read constantly while browsing.
       - ${HOST_MEDIA_LOCATION}:/usr/src/app/upload
 
-      # 2. MANAGED LIBRARY (HDD) — mounted over the upload root's library/
-      # subdirectory so originals land on bulk storage.
-      - ${HOST_LIBRARY_LOCATION}:/usr/src/app/upload/library
-
-      # 3. EXTERNAL LIBRARY SOURCE (HDD, read-only) — the curated folder tree.
-      # Immich indexes these in place and never writes here.
-      - ${HOST_IMPORT_LOCATION}:/usr/src/app/external:ro
-      # TEMPORARY — Photos/ could not be moved into the import tree (open
-      # Windows handle). Mounted into place so restored paths resolve. See .env.
-      - ${HOST_IMPORT_PHOTOS_LOCATION}:/usr/src/app/external/Photos:ro
+      # 2. CURATED ORIGINALS (HDD, read-only) — Photos/, Mems/, videos/, Edits/
+      # all live under this one root, so container paths stay
+      # /usr/src/app/external/<Folder> exactly as the database records them.
+      # Immich indexes in place and never writes here; :ro is what guarantees it.
+      #
+      # Do NOT mount this at /usr/src/app/upload/library. That is Immich's
+      # managed-library path, it is read-write, and the storage-template job
+      # would rename and move the curated tree.
+      - ${HOST_LIBRARY_LOCATION}:/usr/src/app/external:ro
 
       - /etc/localtime:/etc/localtime:ro
     env_file: [.env]

@@ -4,13 +4,16 @@ This repository contains a rootless-ready Podman Compose configuration for Immic
 
 ## 1. Storage Architecture: Tiered Deployment
 
-This stack is engineered for a "Hot/Cold" storage split to maximize UI performance while maintaining bulk capacity on high-density drives. Three host paths are mounted into `immich-server`:
+This stack is engineered for a "Hot/Cold" storage split to maximize UI performance while maintaining bulk capacity on high-density drives. Two host paths are mounted into `immich-server`:
 
 | Variable | Container path | Tier | Holds |
 |---|---|---|---|
-| `HOST_MEDIA_LOCATION` | `/usr/src/app/upload` | SSD | Thumbnails, transcodes, profile images, in-flight uploads, DB backups |
-| `HOST_LIBRARY_LOCATION` | `/usr/src/app/upload/library` | HDD | Managed originals — mounted *over* the upload root's `library/` subdirectory |
-| `HOST_IMPORT_LOCATION` | `/usr/src/app/external` (ro) | HDD | External Library source tree, indexed in place and never written to |
+| `HOST_MEDIA_LOCATION` | `/usr/src/app/upload` | SSD | Immich's working dirs — thumbnails, transcodes, profile images, in-flight uploads, DB backups |
+| `HOST_LIBRARY_LOCATION` | `/usr/src/app/external` (**ro**) | HDD | Your curated originals (`Photos/`, `Mems/`, `videos/`, `Edits/`), indexed in place and never written to |
+
+The originals are an **External Library**: Immich reads them where they sit and your folder structure is authoritative. Nothing is copied into a managed library, so `/usr/src/app/upload/library` stays empty by design.
+
+> **The `:ro` and the `/usr/src/app/external` target are both load-bearing.** Mounting the curated tree at `/usr/src/app/upload/library` instead would make it Immich's *managed* library — read-write, and subject to the Storage Template Migration job, which would rename and move your originals into Immich's own date-based layout.
 
 ### High-Performance Tier (SSD)
 * **Usage:** Thumbnails, transcodes, profile images, Redis cache. The PostgreSQL cluster lives in the `immich_pgdata` podman named volume rather than a bind mount, which avoids NTFS/DrvFs permission problems under WSL2.
@@ -20,7 +23,7 @@ This stack is engineered for a "Hot/Cold" storage split to maximize UI performan
 * **Usage:** Original high-resolution photos and videos.
 * **Logic:** Optimized for large-scale storage capacity.
 
-> **Give `HOST_MEDIA_LOCATION` a directory Immich owns exclusively.** Point it at a folder that already contains your photos and Immich will create its working directories — `thumbs/`, `upload/`, `encoded-video/`, `backups/`, `library/` — interleaved with your own. If you want existing media indexed without being moved, that is what `HOST_IMPORT_LOCATION` and an External Library are for.
+> **Give `HOST_MEDIA_LOCATION` a directory Immich owns exclusively.** Point it at a folder that already contains your photos and Immich will create its working directories — `thumbs/`, `upload/`, `encoded-video/`, `backups/`, `library/` — interleaved with your own. Existing media belongs on the `HOST_LIBRARY_LOCATION` side, indexed in place as an External Library.
 
 ---
 
@@ -39,7 +42,6 @@ Example paths for Linux/WSL2:
 ```
 HOST_MEDIA_LOCATION=/mnt/e/Media/immich-data
 HOST_LIBRARY_LOCATION=/mnt/d/Media/library
-HOST_IMPORT_LOCATION=/mnt/d/Media/immich-import
 DB_PASSWORD=your_secure_password
 ```
 
@@ -57,32 +59,45 @@ podman run --rm --device nvidia.com/gpu=all ubuntu nvidia-smi
 Deploy the stack using podman-compose:
 >`podman-compose up -d`
 
-### Alternative: systemd-native deployment (Quadlet)
+### Alternative: systemd-native deployment (Quadlet pod)
 
-For a production-style setup that starts on boot and is supervised by systemd — no `podman-compose` required — use the Quadlet units in [`quadlet/`](quadlet/README.md). Both deployment methods share the same `.env` file and the same named volumes; the compose file remains the portable reference configuration.
+For a production-style setup that starts on boot and is supervised by systemd — no `podman-compose` required — use the Quadlet units in [`quadlet/`](quadlet/README.md). The four services run as a podman **pod**, so the whole stack has a single start/stop handle:
+
+```bash
+./scripts/immichctl install     # copy units to ~/.config/containers/systemd, validate
+./scripts/immichctl start       # bring up the pod
+./scripts/immichctl status      # unit states, containers, volumes, API health
+./scripts/immichctl stop        # take the whole stack down
+```
+
+Run `./scripts/immichctl --help` for the rest (`restart`, `logs`, `ps`, `update`, `remove`, `uninstall`).
+
+Both deployment methods share the same `.env` file and the same named volumes; the compose file remains the portable reference configuration. Pod-specific hostname overrides live in `quadlet/immich-pod.env` so `.env` stays common to both — see [`quadlet/README.md`](quadlet/README.md) for why.
 
 ---
 
 ## 3. Data Migration and Organization
 
 ### Consolidating Existing Media
-If you have existing media libraries, stage them under `HOST_IMPORT_LOCATION` — never inside `HOST_MEDIA_LOCATION`:
+New media goes into the curated tree under `HOST_LIBRARY_LOCATION` — never inside `HOST_MEDIA_LOCATION`:
 
-1. **Staging:** Create the import tree on your bulk drive, e.g. `D:\Media\immich-import\`.
-2. **Copy Data:** Use a robust copy tool to stage your files. On Windows, Robocopy is recommended for speed:
+1. **Copy data in.** Add the files under an existing top-level folder (`Photos/`, `Mems/`, `videos/`, `Edits/`) or create a new one. On Windows, Robocopy is recommended for speed:
    ```
-   robocopy "D:\Path\To\Source" "D:\Media\immich-import\Source" /E /MT:32 /R:3 /W:5
+   robocopy "D:\Path\To\Source" "D:\Media\library\Source" /E /MT:32 /R:3 /W:5
    ```
-3. **Ingest — pick one:**
-   * **External Library (no copying).** Administration > Libraries > add an external library with import path `/usr/src/app/external`, then **Scan**. Immich indexes the files where they are and leaves your folder structure untouched.
-   * **Managed upload.** Use [`immich-go`](https://github.com/simulot/immich-go) with `--folder-as-album` so each source folder becomes an album, or the [Immich CLI](https://immich.app/docs/features/command-line-interface). Immich copies the files into `HOST_LIBRARY_LOCATION` under the Storage Template.
-4. **Cleanup:** Only after verifying counts and that thumbnails have generated, the staging folder can be removed.
+2. **Scan.** Administration > Libraries > the external library (import path `/usr/src/app/external`) > **Scan**. Immich indexes the files where they are and leaves your folder structure untouched.
+3. **Verify before deleting anything.** Confirm the new asset count and that thumbnails generated, and verify the destination copy by checksum, before removing the source.
+
+> **Do not use managed upload against this layout.** `immich-go` and the Immich CLI copy into the *managed* library at `/usr/src/app/upload/library`, which here resolves to the SSD working dir, not the curated tree — and those assets are then subject to the Storage Template. Keep a single ingest path: files on disk, indexed in place.
 
 ---
 
 ## 4. Recommended Post-Install Configuration
 
 ### Storage Template (Human-Readable Folders)
+
+> **Not applicable to this deployment.** The Storage Template only governs *managed* assets under `/usr/src/app/upload/library`. Here every asset is external, so the template does nothing — your own folder tree already is the human-readable layout. Leave it disabled; the guidance below applies only if you later add managed uploads.
+
 To maintain an organized library that is easy to navigate outside of the Immich UI, enable the **Storage Template** in Settings.
 
 **Recommended Template String:**
@@ -94,10 +109,11 @@ To maintain an organized library that is easy to navigate outside of the Immich 
 To verify that your tiered storage is correctly mapping to the intended drives:
 
 ```bash
-podman exec immich_server df -h /usr/src/app/upload /usr/src/app/upload/library /usr/src/app/external
+podman exec immich_server df -h /usr/src/app/upload /usr/src/app/external
+podman exec immich_server touch /usr/src/app/external/.wtest   # must fail: read-only
 ```
 
-The upload root should report your SSD's capacity, and both HDD paths your bulk drive's. If `library` reports the same device as the upload root, the override mount is not in effect.
+The upload root should report your SSD's capacity and `/usr/src/app/external` your bulk drive's. The `touch` **must** fail with "Read-only file system" — if it succeeds, the `:ro` flag was lost and Immich can write into your originals.
 
 ### Maintenance & Jobs
 After enabling the Storage Template, go to **Administration > Jobs** and run:
