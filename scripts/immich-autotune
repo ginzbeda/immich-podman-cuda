@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+# immich-autotune — give Immich the machine's spare capacity and take it back
+# the moment anything else needs it.
+#
+# Two independent layers:
+#   1. cgroup v2 (always active, no credentials): CPUWeight / CPUQuota / MemoryHigh
+#      on the Immich units, adjusted per profile.
+#   2. Immich job concurrency via the API (only if an API key is configured):
+#      queues less work so memory and disk I/O drop too.
+#
+# Signals, all cheap and read every INTERVAL seconds:
+#   - foreign CPU:  /proc/stat busy delta MINUS the Immich cgroups' own usage,
+#                   so Immich working hard never causes it to throttle itself.
+#   - free memory:  MemAvailable from /proc/meminfo.
+#   - foreign GPU:  nvidia-smi utilisation, attributed to something other than
+#                   Immich when the ML container is not itself busy. This is how
+#                   a Windows game or video editor gets out of the way.
+#   - PSI:          /proc/pressure/{memory,io} as a backstop for thrashing.
+#
+# Demote instantly, promote slowly: yielding must be immediate to be useful,
+# but ramping back up must not flap.
+set -uo pipefail
+
+INTERVAL="${INTERVAL:-15}"
+PROMOTE_SAMPLES="${PROMOTE_SAMPLES:-6}"     # ~90s of calm before ramping up
+RECOVER_SAMPLES="${RECOVER_SAMPLES:-3}"     # ~45s before leaving yield at all
+BASELINE_WINDOW="${BASELINE_WINDOW:-40}"    # samples used for the idle floor (~10 min)
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/immich-autotune"
+CONFIG="${HOME}/.config/immich-autotune/config.env"
+
+UNITS=(immich-server immich-machine-learning immich-postgres immich-redis)
+CG_BASE="/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice"
+NCPU="$(nproc)"
+
+[ -r "$CONFIG" ] && . "$CONFIG"
+mkdir -p "$STATE_DIR"
+
+log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+
+# ---- thresholds -------------------------------------------------------------
+# CPU thresholds are RELATIVE to a learned idle baseline, not absolute. This box
+# idles near 35% foreign CPU because ~24 unrelated containers are always running;
+# an absolute threshold either fires constantly or never fires at all. The
+# baseline tracks the running minimum with slow upward drift, so "busy" means
+# "busier than this machine's own floor".
+YIELD_MARGIN="${YIELD_MARGIN:-18}"   # yield at baseline + this many points
+TURBO_MARGIN="${TURBO_MARGIN:-4}"    # turbo only at/near the floor
+YIELD_MEM_MB="${YIELD_MEM_MB:-900}"         # MemAvailable floor
+YIELD_GPU_PCT="${YIELD_GPU_PCT:-50}"         # foreign GPU utilisation (smoothed)
+YIELD_MEM_PSI="${YIELD_MEM_PSI:-15}"         # /proc/pressure/memory some avg10
+TURBO_MEM_MB="${TURBO_MEM_MB:-1900}"
+TURBO_GPU_PCT="${TURBO_GPU_PCT:-15}"
+
+# ---- profile definitions ----------------------------------------------------
+# CPUQuota is percent-of-one-CPU; with N cores, N*100% is the whole machine.
+profile_cgroup() {
+  case "$1" in
+    turbo)  W_SRV=100 W_ML=100 W_DB=100 Q_SRV="" Q_ML="" MH_SRV=2500M MH_ML=3500M ;;
+    normal) W_SRV=50  W_ML=50  W_DB=80  Q_SRV=$((NCPU*60))% Q_ML=$((NCPU*60))% MH_SRV=1500M MH_ML=2500M ;;
+    yield)  W_SRV=10  W_ML=10  W_DB=40  Q_SRV=$((NCPU*15))% Q_ML=$((NCPU*10))% MH_SRV=900M  MH_ML=1800M ;;
+  esac
+}
+
+# Immich job concurrency per profile: thumb,meta,smart,face,facerec,video,ocr,sidecar
+profile_jobs() {
+  case "$1" in
+    turbo)  echo "6 8 3 3 1 1 2 6" ;;
+    normal) echo "3 5 2 2 1 1 1 5" ;;
+    yield)  echo "1 1 1 1 1 1 1 1" ;;
+  esac
+}
+
+# ---- signal collection ------------------------------------------------------
+read_cpu_busy_usec() {   # total non-idle CPU time, in usec
+  awk '/^cpu /{busy=($2+$3+$4+$7+$8+$9); print busy*10000; exit}' /proc/stat
+}
+read_immich_cpu_usec() {
+  local t=0 v
+  for u in "${UNITS[@]}"; do
+    v=$(awk '/^usage_usec/{print $2}' "$CG_BASE/$u.service/cpu.stat" 2>/dev/null || echo 0)
+    t=$((t + ${v:-0}))
+  done
+  echo "$t"
+}
+read_mem_avail_mb() { awk '/^MemAvailable/{print int($2/1024)}' /proc/meminfo; }
+read_mem_psi()      { awk -F'avg10=' '/^some/{print int($2)}' /proc/pressure/memory 2>/dev/null || echo 0; }
+read_gpu_util()     { nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 0; }
+ml_is_busy() {  # is Immich itself the one using the GPU?
+  local v; v=$(awk '/^usage_usec/{print $2}' "$CG_BASE/immich-machine-learning.service/cpu.stat" 2>/dev/null || echo 0)
+  local prev=0; [ -f "$STATE_DIR/ml_usec" ] && prev=$(cat "$STATE_DIR/ml_usec")
+  echo "$v" > "$STATE_DIR/ml_usec"
+  # >25% of one core over the interval means it is actively doing inference
+  [ $(( (v - prev) / (INTERVAL * 10000) )) -gt 25 ]
+}
+
+# ---- appliers ---------------------------------------------------------------
+apply_cgroup() {
+  profile_cgroup "$1"
+  systemctl --user --runtime set-property immich-server.service \
+    CPUWeight=$W_SRV MemoryHigh=$MH_SRV ${Q_SRV:+CPUQuota=$Q_SRV} 2>/dev/null
+  [ -z "$Q_SRV" ] && systemctl --user --runtime set-property immich-server.service CPUQuota= 2>/dev/null
+  systemctl --user --runtime set-property immich-machine-learning.service \
+    CPUWeight=$W_ML MemoryHigh=$MH_ML ${Q_ML:+CPUQuota=$Q_ML} 2>/dev/null
+  [ -z "$Q_ML" ] && systemctl --user --runtime set-property immich-machine-learning.service CPUQuota= 2>/dev/null
+  systemctl --user --runtime set-property immich-postgres.service CPUWeight=$W_DB 2>/dev/null
+}
+
+apply_jobs() {
+  [ -n "${IMMICH_API_KEY:-}" ] || return 0
+  local url="${IMMICH_URL:-http://127.0.0.1:2283}"
+  read -r t m s f fr v o sc <<<"$(profile_jobs "$1")"
+  local cfg
+  cfg=$(curl -sf -H "x-api-key: $IMMICH_API_KEY" "$url/api/system-config") || return 0
+  echo "$cfg" | jq \
+    --argjson t "$t" --argjson m "$m" --argjson s "$s" --argjson f "$f" \
+    --argjson fr "$fr" --argjson v "$v" --argjson o "$o" --argjson sc "$sc" '
+      .job.thumbnailGeneration.concurrency = $t
+    | .job.metadataExtraction.concurrency   = $m
+    | .job.smartSearch.concurrency          = $s
+    | .job.faceDetection.concurrency        = $f
+    | .job.facialRecognition.concurrency    = $fr
+    | .job.videoConversion.concurrency      = $v
+    | .job.ocr.concurrency                  = $o
+    | .job.sidecar.concurrency              = $sc' \
+  | curl -sf -o /dev/null -X PUT -H "x-api-key: $IMMICH_API_KEY" \
+      -H 'Content-Type: application/json' --data @- "$url/api/system-config" || return 0
+}
+
+# --status: what the tuner currently thinks and what it has actually applied.
+if [ "${1:-}" = --status ]; then
+  cg="/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice"
+  printf 'profile   : %s\n' "$(cat "$STATE_DIR/profile" 2>/dev/null || echo '(not running)')"
+  printf 'idle floor: %s%%  (yield >= %s%%, turbo <= %s%%)\n' \
+    "$(cat "$STATE_DIR/baseline" 2>/dev/null || echo '?')" \
+    "$(( $(cat "$STATE_DIR/baseline" 2>/dev/null || echo 0) + YIELD_MARGIN ))" \
+    "$(( $(cat "$STATE_DIR/baseline" 2>/dev/null || echo 0) + TURBO_MARGIN ))"
+  printf 'mem avail : %s MB   gpu: %s%%\n' "$(read_mem_avail_mb)" "$(read_gpu_util)"
+  echo
+  printf '%-26s %-8s %-16s %s\n' UNIT WEIGHT CPU.MAX MEMORY.HIGH
+  for u in "${UNITS[@]}"; do
+    printf '%-26s %-8s %-16s %s\n' "$u" \
+      "$(cat "$cg/$u.service/cpu.weight" 2>/dev/null || echo -)" \
+      "$(cat "$cg/$u.service/cpu.max"    2>/dev/null || echo -)" \
+      "$(cat "$cg/$u.service/memory.high" 2>/dev/null || echo -)"
+  done
+  echo
+  if [ -n "${IMMICH_API_KEY:-}" ]; then
+    echo "Immich job concurrency: ACTIVE (API key configured)"
+  else
+    echo "Immich job concurrency: inactive - no API key at $CONFIG"
+    echo "  cgroup limits still apply; add a key to also throttle queue depth."
+  fi
+  exit 0
+fi
+
+# ---- main loop --------------------------------------------------------------
+prev_busy=$(read_cpu_busy_usec); prev_immich=$(read_immich_cpu_usec)
+# Seed the ML baseline too, or the first ml_is_busy() compares against zero,
+# reports Immich as the GPU user, and blinds the foreign-GPU signal for a cycle.
+awk '/^usage_usec/{print $2}' "$CG_BASE/immich-machine-learning.service/cpu.stat" \
+  2>/dev/null > "$STATE_DIR/ml_usec" || echo 0 > "$STATE_DIR/ml_usec"
+current=""; calm=0; beat=0; gpu_peak=0; recover=0
+baseline=0; window_samples=""
+trap 'log "stopping"; exit 0' TERM INT
+
+while :; do
+  sleep "$INTERVAL"
+
+  busy=$(read_cpu_busy_usec); immich=$(read_immich_cpu_usec)
+  window=$(( INTERVAL * 1000000 * NCPU ))
+  foreign=$(( busy - prev_busy - (immich - prev_immich) ))
+  [ "$foreign" -lt 0 ] && foreign=0
+  cpu_pct=$(( foreign * 100 / window ))
+  prev_busy=$busy; prev_immich=$immich
+
+  # Baseline = minimum over a sliding window. A creeping average would chase
+  # sustained load upward (work for 10 minutes and the "idle floor" rises to
+  # meet you, so Immich stops yielding exactly when you need it to). A windowed
+  # minimum drops instantly and only rises when the quiet sample ages out.
+  window="$window_samples $cpu_pct"
+  window_samples=$(echo "$window" | tr ' ' '\n' | grep -v '^$' | tail -n "$BASELINE_WINDOW" | tr '\n' ' ')
+  baseline=$(echo "$window_samples" | tr ' ' '\n' | grep -v '^$' | sort -n | head -1)
+  echo "$baseline" > "$STATE_DIR/baseline"
+  yield_at=$(( baseline + YIELD_MARGIN )); turbo_at=$(( baseline + TURBO_MARGIN ))
+
+  mem_mb=$(read_mem_avail_mb); mem_psi=$(read_mem_psi); gpu=$(read_gpu_util)
+  if ml_is_busy; then gpu_raw=0; else gpu_raw=$gpu; fi
+  # Decaying peak: react instantly to a spike, fall back over ~4 cycles. Raw
+  # utilisation is sampled instantaneously and is far too noisy to threshold on.
+  gpu_foreign=$(( gpu_peak * 7 / 10 ))
+  [ "$gpu_raw" -gt "$gpu_foreign" ] && gpu_foreign=$gpu_raw
+  gpu_peak=$gpu_foreign
+
+  if   [ "$cpu_pct" -ge "$yield_at" ] || [ "$mem_mb" -le "$YIELD_MEM_MB" ] \
+    || [ "$gpu_foreign" -ge "$YIELD_GPU_PCT" ] || [ "$mem_psi" -ge "$YIELD_MEM_PSI" ]; then
+    want=yield; calm=0; recover=0
+  elif [ "$cpu_pct" -le "$turbo_at" ] && [ "$mem_mb" -gt "$TURBO_MEM_MB" ] \
+    && [ "$gpu_foreign" -lt "$TURBO_GPU_PCT" ]; then
+    calm=$((calm + 1)); recover=$((recover + 1))
+    if [ "$calm" -ge "$PROMOTE_SAMPLES" ]; then want=turbo; else want="${current:-normal}"; fi
+  else
+    recover=$((recover + 1)); want=normal; calm=0
+  fi
+
+  # Leaving yield takes RECOVER_SAMPLES of calm; entering it is immediate.
+  if [ "$current" = yield ] && [ "$want" != yield ] && [ "$recover" -lt "$RECOVER_SAMPLES" ]; then
+    want=yield
+  fi
+
+  line="foreign_cpu=${cpu_pct}% (base=${baseline} yield>=${yield_at} turbo<=${turbo_at})  mem_avail=${mem_mb}MB  gpu=${gpu}%  gpu_foreign=${gpu_foreign}%  mem_psi=${mem_psi}"
+  if [ "$want" != "$current" ]; then
+    apply_cgroup "$want"; apply_jobs "$want"
+    log "profile ${current:-none} -> $want   $line"
+    current="$want"
+    echo "$want" > "$STATE_DIR/profile"
+    beat=0
+  else
+    # Heartbeat every ~5 min so the decision inputs are auditable after the fact.
+    beat=$((beat + 1))
+    if [ "$beat" -ge 20 ]; then log "profile=$current (steady)  $line"; beat=0; fi
+  fi
+done

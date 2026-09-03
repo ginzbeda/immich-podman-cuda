@@ -1,0 +1,18 @@
+[Unit]
+Description=Immich adaptive resource tuning (yield to foreground work, use spare capacity)
+After=immich-pod.service
+Wants=immich-pod.service
+
+[Service]
+Type=simple
+ExecStart=%h/dev/repo/immich-app/scripts/immich-autotune
+Restart=always
+RestartSec=10
+# The tuner itself must never be part of the problem.
+CPUWeight=10
+MemoryHigh=64M
+Nice=10
+SyslogIdentifier=immich-autotune
+
+[Install]
+WantedBy=default.target
