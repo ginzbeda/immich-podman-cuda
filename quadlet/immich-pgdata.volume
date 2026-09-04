@@ -1,0 +1,8 @@
+[Unit]
+Description=Immich PostgreSQL data
+
+[Volume]
+# Adopts the EXISTING volume created by podman-compose (project "immich" + "pgdata").
+# Do not rename: this holds the live cluster. A different name silently initdb's a
+# blank database and leaves the real one orphaned.
+VolumeName=immich_pgdata

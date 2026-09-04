@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Install the Immich API key the tuner uses, without the key ever appearing in a
+# command line, a shell history, a terminal echo, or a chat transcript.
+#
+#   ./scripts/immich-autotune-setkey                 read it from a hidden prompt
+#   ./scripts/immich-autotune-setkey --from-clipboard  read it from the Windows clipboard
+#
+# The key is typed at runtime, never passed as an argument, and is written only
+# to ~/.config/immich-autotune/config.env with mode 600. Nothing this script
+# prints contains the key, so it is safe to run inside an agent session.
+set -uo pipefail
+
+CONF_DIR="${HOME}/.config/immich-autotune"
+CONF="${CONF_DIR}/config.env"
+URL="${IMMICH_URL:-http://127.0.0.1:2283}"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+case "${1:-}" in
+  --from-clipboard)
+    KEY=$(powershell.exe -NoProfile -Command Get-Clipboard 2>/dev/null | tr -d '\r\n')
+    [ -n "$KEY" ] || die "clipboard was empty (copy the key from Immich first)"
+    printf 'Read %d characters from the Windows clipboard.\n' "${#KEY}"
+    ;;
+  --help|-h)
+    sed -n '2,12p' "$0" | sed 's/^# \?//'; exit 0 ;;
+  *)
+    printf 'Immich API key (input hidden, nothing is echoed): '
+    read -rs KEY; printf '\n'
+    [ -n "$KEY" ] || die "no key entered"
+    ;;
+esac
+
+# Pass the key to curl through a 0600 config file rather than -H, so it never
+# shows up in `ps` output for any other process on the box.
+CURLCFG=$(mktemp); chmod 600 "$CURLCFG"
+trap 'rm -f "$CURLCFG" "${BODY:-}"' EXIT
+printf 'header = "x-api-key: %s"\n' "$KEY" > "$CURLCFG"
+
+printf 'Checking systemConfig.read ... '
+BODY=$(mktemp); chmod 600 "$BODY"
+code=$(curl -sS -K "$CURLCFG" -o "$BODY" -w '%{http_code}' "$URL/api/system-config")
+case "$code" in
+  200) echo "ok" ;;
+  401|403) die "rejected (HTTP $code) - key is invalid or lacks systemConfig.read" ;;
+  *)   die "unexpected HTTP $code from $URL - is Immich running?" ;;
+esac
+jq -e '.job.thumbnailGeneration.concurrency' "$BODY" >/dev/null 2>&1 \
+  || die "response was not an Immich system config"
+
+# Verifying update matters: without it the tuner fails silently and only the
+# cgroup half would ever work. Writing the config back unchanged is a true no-op.
+printf 'Checking systemConfig.update ... '
+code=$(curl -sS -K "$CURLCFG" -o /dev/null -w '%{http_code}' -X PUT \
+        -H 'Content-Type: application/json' --data @"$BODY" "$URL/api/system-config")
+case "$code" in
+  200) echo "ok" ;;
+  401|403) die "rejected (HTTP $code) - add the systemConfig.update permission to this key" ;;
+  *)   die "unexpected HTTP $code on write-back" ;;
+esac
+
+install -d -m 700 "$CONF_DIR"
+umask 077
+printf 'IMMICH_URL=%s\nIMMICH_API_KEY=%s\n' "$URL" "$KEY" > "$CONF"
+chmod 600 "$CONF"
+# Deliberately prints the length only. Echoing even a few characters of the key
+# would defeat the point when this is run inside an agent session.
+printf 'Wrote %s (mode 600, %d-character key).\n' "$CONF" "${#KEY}"
+
+if systemctl --user is-enabled --quiet immich-autotune.service 2>/dev/null; then
+  systemctl --user restart immich-autotune.service && echo "Restarted immich-autotune."
+fi
+echo "Verify with: ./scripts/immich-autotune --status"

@@ -5,11 +5,24 @@ services:
     container_name: immich_server
     image: ghcr.io/immich-app/immich-server:${IMMICH_VERSION:-release}
     volumes:
-      - ${IMMICH_STORAGE_LOCATION}:/usr/src/app/upload
+      # 1. WORKING DIRS (SSD) — thumbs, encoded-video, profile, upload, backups.
+      # Small files read constantly while browsing.
+      - ${HOST_MEDIA_LOCATION}:/usr/src/app/upload
+
+      # 2. CURATED ORIGINALS (HDD, read-only) — Photos/, Mems/, videos/, Edits/
+      # all live under this one root, so container paths stay
+      # /usr/src/app/external/<Folder> exactly as the database records them.
+      # Immich indexes in place and never writes here; :ro is what guarantees it.
+      #
+      # Do NOT mount this at /usr/src/app/upload/library. That is Immich's
+      # managed-library path, it is read-write, and the storage-template job
+      # would rename and move the curated tree.
+      - ${HOST_LIBRARY_LOCATION}:/usr/src/app/external:ro
+
       - /etc/localtime:/etc/localtime:ro
     env_file: [.env]
     ports:
-      - 2283:2283
+      - 127.0.0.1:2283:2283
     devices:
       - nvidia.com/gpu=all
     environment:
@@ -34,22 +47,26 @@ services:
 
   redis:
     container_name: immich_redis
-    image: docker.io/library/redis:6.2-alpine
+    image: docker.io/valkey/valkey:9@sha256:4963247afc4cd33c7d3b2d2816b9f7f8eeebab148d29056c2ca4d7cbc966f2d9
     volumes:
-      - ${IMMICH_CONFIG_LOCATION}/redis:/data
+      - ${HOST_MEDIA_LOCATION}/redis:/data
     restart: always
 
   database:
     container_name: immich_postgres
-    image: docker.io/tensorchord/pgvecto-rs:pg14-v0.2.0
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
     env_file: [.env]
     environment:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
       POSTGRES_DB: ${DB_DATABASE_NAME}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
     volumes:
-      - ${IMMICH_CONFIG_LOCATION}/postgres:/var/lib/postgresql/data
+      # We use a named volume to bypass NTFS permission issues
+      - pgdata:/var/lib/postgresql/data
+    shm_size: 128mb
     restart: always
 
 volumes:
   model-cache:
+  pgdata:

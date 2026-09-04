@@ -1,0 +1,39 @@
+[Unit]
+Description=Immich Server
+# Pod membership (BindsTo=immich-pod.service, added by quadlet) starts and stops
+# the whole stack together; these only order us behind our backing services.
+After=immich-redis.service immich-postgres.service
+
+[Container]
+ContainerName=immich_server
+Image=ghcr.io/immich-app/immich-server:release
+AutoUpdate=registry
+Pod=immich.pod
+# PublishPort lives on immich.pod - podman only accepts it at pod-creation time.
+EnvironmentFile=%h/dev/repo/immich-app/.env
+EnvironmentFile=%h/dev/repo/immich-app/quadlet/immich-pod.env
+# GPU available for hardware video transcoding
+AddDevice=nvidia.com/gpu=all
+
+# --- Tiered storage: SSD working dirs, HDD curated originals ---
+# 1. WORKING DIRS (SSD) - thumbs, encoded-video, profile, upload, backups.
+Volume=${HOST_MEDIA_LOCATION}:/usr/src/app/upload
+# 2. CURATED ORIGINALS (HDD, read-only) - Photos/, Mems/, videos/, Edits/ all
+# live under this one root, so container paths stay /usr/src/app/external/<Folder>
+# exactly as the database already records them. Immich indexes in place.
+Volume=${HOST_LIBRARY_LOCATION}:/usr/src/app/external:ro
+
+Volume=/etc/localtime:/etc/localtime:ro
+
+[Service]
+# Enables ${HOST_MEDIA_LOCATION} / ${HOST_LIBRARY_LOCATION} expansion above
+EnvironmentFile=%h/dev/repo/immich-app/.env
+EnvironmentFile=%h/dev/repo/immich-app/quadlet/immich-pod.env
+Restart=always
+TimeoutStartSec=900
+# Node exits 143 (128+SIGTERM) on a normal stop, which systemd would otherwise
+# treat as a failed unit. Same pattern as jellyseerr.container.
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target

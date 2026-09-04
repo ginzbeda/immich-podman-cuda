@@ -1,0 +1,20 @@
+[Unit]
+Description=Immich pod - server, ML, postgres and redis share one netns
+
+[Pod]
+PodName=immich
+Network=immich.network
+
+# Podman only allows port publishing at pod-creation time, not on individual pod
+# members, so immich-server's PublishPort lives here instead of in its own
+# .container (same pattern as media.pod).
+#
+# Bound to loopback, matching docker-compose.yml. Reach it from Windows via WSL's
+# localhost forwarding; put a reverse proxy in front for LAN access.
+PublishPort=127.0.0.1:2283:2283
+
+# No port collisions inside the shared netns:
+#   immich_server 2283 | immich_machine_learning 3003 | postgres 5432 | redis 6379
+
+[Install]
+WantedBy=default.target
