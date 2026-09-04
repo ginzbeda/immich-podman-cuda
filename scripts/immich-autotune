@@ -35,6 +35,14 @@ NCPU="$(nproc)"
 [ -r "$CONFIG" ] && . "$CONFIG"
 mkdir -p "$STATE_DIR"
 
+# Hand the API key to curl through a 0600 config file instead of -H. Passing it
+# as an argument would put it in this process's argv, readable via `ps` by
+# anything else on the box, and re-exposed on every poll.
+CURL_CFG="$STATE_DIR/curl.conf"
+if [ -n "${IMMICH_API_KEY:-}" ]; then
+  ( umask 077; printf 'header = "x-api-key: %s"\n' "$IMMICH_API_KEY" > "$CURL_CFG" )
+fi
+
 log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 
@@ -42,8 +50,8 @@ log() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*"; }
 # CPU thresholds are RELATIVE to a learned idle baseline, not absolute. This box
 # idles near 35% foreign CPU because ~24 unrelated containers are always running;
 # an absolute threshold either fires constantly or never fires at all. The
-# baseline tracks the running minimum with slow upward drift, so "busy" means
-# "busier than this machine's own floor".
+# baseline is the minimum over a sliding window, so "busy" means "busier than
+# this machine's own floor".
 YIELD_MARGIN="${YIELD_MARGIN:-18}"   # yield at baseline + this many points
 TURBO_MARGIN="${TURBO_MARGIN:-4}"    # turbo only at/near the floor
 YIELD_MEM_MB="${YIELD_MEM_MB:-900}"         # MemAvailable floor
@@ -111,7 +119,7 @@ apply_jobs() {
   local url="${IMMICH_URL:-http://127.0.0.1:2283}"
   read -r t m s f fr v o sc <<<"$(profile_jobs "$1")"
   local cfg
-  cfg=$(curl -sf -H "x-api-key: $IMMICH_API_KEY" "$url/api/system-config") || return 0
+  cfg=$(curl -sf -K "$CURL_CFG" "$url/api/system-config") || return 0
   echo "$cfg" | jq \
     --argjson t "$t" --argjson m "$m" --argjson s "$s" --argjson f "$f" \
     --argjson fr "$fr" --argjson v "$v" --argjson o "$o" --argjson sc "$sc" '
@@ -123,7 +131,7 @@ apply_jobs() {
     | .job.videoConversion.concurrency      = $v
     | .job.ocr.concurrency                  = $o
     | .job.sidecar.concurrency              = $sc' \
-  | curl -sf -o /dev/null -X PUT -H "x-api-key: $IMMICH_API_KEY" \
+  | curl -sf -o /dev/null -X PUT -K "$CURL_CFG" \
       -H 'Content-Type: application/json' --data @- "$url/api/system-config" || return 0
 }
 
